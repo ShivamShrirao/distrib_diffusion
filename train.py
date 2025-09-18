@@ -46,7 +46,9 @@ def infer(
     model,
     scheduler,
     random_points,
-    idx
+    cond=None,
+    cfg=1,
+    idx=0,
 ):
     infer_steps = len(scheduler.sigmas)
     model.eval()
@@ -56,7 +58,7 @@ def infer(
 
     snapshots = []
     for step in range(infer_steps):
-        x_t = scheduler.step(model, step, x_t)
+        x_t = scheduler.step(model, step, x_t, cond=cond, cfg=cfg)
         if step in selected_set:
             x_gen = x_t.cpu().numpy().copy()
             snapshots.append((step, x_gen))
@@ -67,44 +69,43 @@ def infer(
         fig, axes = plt.subplots(1, cols, figsize=(6 * cols, 6), sharex=True, sharey=True)
         axes = axes if isinstance(axes, (list, np.ndarray)) else [axes]
         for ax, (s, pts) in zip(axes, snapshots):
-            ax.scatter(pts[:, 0], pts[:, 1])
+            if config.class_conditional:
+                c = cond.argmax(dim=1).cpu().numpy()
+            else:
+                c = None
+            ax.scatter(pts[:, 0], pts[:, 1], c=c)
             ax.set_title(f"Step {s+1}")
             ax.set_xlim(-2, 3)
             ax.set_ylim(-2, 2)
-            wandb.log({f"{scheduler.__class__.__name__}_steps:{infer_steps}_shift:{scheduler.shift}": wandb.Image(fig)}, step=idx)
+            wandb.log({f"{scheduler.__class__.__name__}_steps:{infer_steps}": wandb.Image(fig)}, step=idx)
             plt.close(fig)
 
     model.train()
     return x_t
 
 
-def eval_metrics(eval_samples, x_gen):
+def eval_metrics(eval_samples, x_gen, prefix=""):
     gen_samples = x_gen.cpu().numpy()
     metrics = {}
 
     w_dist = wasserstein_distance_2d(eval_samples, gen_samples)
-    metrics['wasserstein_distance'] = w_dist
+    metrics[f'{prefix}wasserstein_distance'] = w_dist
 
     mmd = mmd_rbf(eval_samples, gen_samples)
-    metrics['mmd'] = mmd
+    metrics[f'{prefix}mmd'] = mmd
 
     coverage, density = coverage_and_density(eval_samples, gen_samples, k=5)
-    metrics['coverage'] = coverage
-    metrics['density'] = density
+    metrics[f'{prefix}coverage'] = coverage
+    metrics[f'{prefix}density'] = density
 
     nll = negative_log_likelihood(eval_samples, gen_samples)
-    metrics['nll'] = nll
+    metrics[f'{prefix}nll'] = nll
     return metrics
 
 
 @torch.no_grad()
 def hungarian_match(real, noise):
     cost = torch.cdist(real, noise, p=2).pow(2)
-
-    # X_norm = real / real.norm(dim=1, keepdim=True)
-    # Y_norm = noise / noise.norm(dim=1, keepdim=True)
-    # cost = -torch.mm(X_norm, Y_norm.t())
-
     assignment = batch_linear_assignment(cost.unsqueeze(0))
     row_ind, col_ind = assignment_to_indices(assignment)
     return noise[col_ind.flatten()]
@@ -131,6 +132,7 @@ def main():
 
     loss_log = AvgMeter()
     eval_samples, eval_labels = make_moons(n_samples=1000, noise=0.03, random_state=config.seed)
+    eval_one_hot = F.one_hot(torch.from_numpy(eval_labels), num_classes=2).to(device, non_blocking=True)
     random_points = torch.randn(1000, 2, device=device, generator=torch.Generator(device=device).manual_seed(config.seed))
 
     log = {}
@@ -138,13 +140,21 @@ def main():
     for i in pbar:
         x_0, y = make_moons(n_samples=config.training.batch_size, noise=0.03, random_state=i)
         x_0 = torch.from_numpy(x_0).float()
+        if config.class_conditional:
+            y = F.one_hot(torch.from_numpy(y), num_classes=2)
+            y = y.to(device, non_blocking=True)
+            p = torch.rand(y.shape[0], device=device)
+            y[p <= 0.1] = 0         # for CFG
+        else:
+            y = None
+
         x_0 = x_0.to(device, non_blocking=True)
         noise = torch.randn_like(x_0)
         if config.optimal_transport_training:
             noise = hungarian_match(x_0, noise)
         t = torch.rand(x_0.shape[0], device=device).unsqueeze(1)
         x_t = (1 - t) * x_0 + t * noise
-        model_pred = model(x_t, t)
+        model_pred = model(x_t, t, y)
         target = noise - x_0
         loss = F.mse_loss(model_pred, target)
         opt.zero_grad(set_to_none=True)
@@ -154,8 +164,14 @@ def main():
 
         if i % config.training.eval_interval == 0:
             scheduler = FlowScheduler(num_steps=50, shift=1.0, device=device)
-            x_gen = infer(config, model, scheduler, random_points, i)
-            metrics = eval_metrics(eval_samples, x_gen)
+            x_gen = infer(config=config, model=model, scheduler=scheduler, random_points=random_points, cond=eval_one_hot, cfg=config.cfg, idx=i)
+            # TODO: metrics per class condition
+            if config.class_conditional:
+                metrics = {}
+                for c in np.unique(eval_labels):
+                    metrics.update(eval_metrics(eval_samples[eval_labels == c], x_gen[eval_labels == c], prefix=f"class_{c}/"))
+            else:
+                metrics = eval_metrics(eval_samples, x_gen)
             log.update(metrics)
             if config.wandb.enabled:
                 wandb.log(log, step=i)

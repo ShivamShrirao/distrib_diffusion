@@ -12,7 +12,7 @@ activation_dict = {
 
 
 class SimpleModel(nn.Module):
-    def __init__(self, input_dim: int = 2, hidden_dim: int = 128, num_layers: int = 3, activation: str = "silu"):
+    def __init__(self, input_dim: int = 2, hidden_dim: int = 128, num_layers: int = 3, activation: str = "silu", *args, **kwargs):
         super().__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
@@ -25,7 +25,7 @@ class SimpleModel(nn.Module):
         self.layers = nn.Sequential(*layers)
         self.output_layer = nn.Linear(hidden_dim, input_dim)
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, t: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         x = torch.cat([x, t], dim=-1)
         x = self.activation(self.input_layer(x))
         x = self.layers(x)
@@ -53,7 +53,7 @@ class SimpleModelSinTime(SimpleModel):
             nn.Linear(self.hidden_dim, self.hidden_dim)
         )
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, t: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         t = sinusoidal_time_embed(t, self.t_dim)
         t = self.time_embed(t)
         x = self.activation(self.input_layer(x) + t)
@@ -62,14 +62,14 @@ class SimpleModelSinTime(SimpleModel):
         return x
 
 
-class SimpleModelLabelled(SimpleModel):
+class SimpleModelCond(SimpleModel):
     def __init__(self, num_classes: int = 2, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.num_classes = num_classes
         self.input_layer = nn.Linear(self.input_dim + 1 + num_classes, self.hidden_dim)
     
-    def forward(self, x: torch.Tensor, t: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        x = torch.cat([x, t, y], dim=-1)
+    def forward(self, x: torch.Tensor, t: torch.Tensor, c: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+        x = torch.cat([x, t, c], dim=-1)
         x = self.activation(self.input_layer(x))
         x = self.layers(x)
         x = self.output_layer(x)
