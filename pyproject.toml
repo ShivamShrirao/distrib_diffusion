@@ -1,0 +1,17 @@
+[project]
+name = "distrib-diffusion"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "ipykernel>=6.30.1",
+    "matplotlib>=3.10.6",
+    "omegaconf>=2.3.0",
+    "pot>=0.9.5",
+    "scikit-learn>=1.7.2",
+    "torch>=2.8.0",
+    "torch-linear-assignment>=0.0.5",
+    "tqdm>=4.67.1",
+    "wandb>=0.21.4",
+]
