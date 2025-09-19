@@ -4,7 +4,7 @@ wandb:
   enabled: true
   project: distrib_diffusion
 
-optimal_transport_training: false
+optimal_transport_training: true
 class_conditional: true
 cfg: 3
 

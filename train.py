@@ -1,19 +1,20 @@
 import random
+from collections import defaultdict
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
-import wandb
 from omegaconf import OmegaConf
-from sklearn.datasets import make_moons
-from tqdm import tqdm
 from scipy.optimize import linear_sum_assignment
-from torch_linear_assignment import batch_linear_assignment, assignment_to_indices
+from sklearn.datasets import make_moons
+from torch_linear_assignment import assignment_to_indices, batch_linear_assignment
+from tqdm import tqdm
 
 import src.models
-from src.schedulers import FlowScheduler, FlowMidPointScheduler
-from src.metrics import AvgMeter, wasserstein_distance_2d, mmd_rbf, coverage_and_density, negative_log_likelihood, sinkhorn_distance_2d
+import wandb
+from src.metrics import AvgMeter, mmd_rbf, wasserstein_distance_2d
+from src.schedulers import FlowMidPointScheduler, FlowScheduler
 
 torch.backends.cudnn.benchmark = True
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -78,14 +79,14 @@ def infer(
             ax.set_xlim(-2, 3)
             ax.set_ylim(-2, 2)
             plt.tight_layout()
-            wandb.log({f"{scheduler.__class__.__name__}_steps:{infer_steps:02d}": wandb.Image(fig)}, step=idx)
+            wandb.log({f"FlowScheduler_steps:{infer_steps:02d}": wandb.Image(fig)}, step=idx)
             plt.close(fig)
 
     model.train()
     return x_t
 
 
-def eval_metrics(eval_samples, gen_samples, prefix="", idx=0):
+def eval_metrics(eval_samples, gen_samples, prefix=""):
     metrics = {}
 
     w_dist = wasserstein_distance_2d(eval_samples, gen_samples)
@@ -94,14 +95,6 @@ def eval_metrics(eval_samples, gen_samples, prefix="", idx=0):
     mmd = mmd_rbf(eval_samples, gen_samples)
     metrics[f'{prefix}mmd'] = mmd
 
-    coverage, density = coverage_and_density(eval_samples, gen_samples, k=5)
-    metrics[f'{prefix}coverage'] = coverage
-    metrics[f'{prefix}density'] = density
-
-    nll = negative_log_likelihood(eval_samples, gen_samples)
-    metrics[f'{prefix}nll'] = nll
-
-    metrics[f'{prefix}sinkhorn'] = sinkhorn_distance_2d(eval_samples, gen_samples, reg=0.1)
     return metrics
 
 
@@ -135,7 +128,9 @@ def main():
 
     loss_log = AvgMeter()
     eval_samples, eval_labels = make_moons(n_samples=1000, noise=0.03, random_state=config.seed)
-    eval_one_hot = F.one_hot(torch.from_numpy(eval_labels), num_classes=2).float().to(device, non_blocking=True)
+    eval_samples = torch.from_numpy(eval_samples).float().to(device, non_blocking=True)
+    eval_labels = torch.from_numpy(eval_labels).to(device, non_blocking=True)
+    eval_one_hot = F.one_hot(eval_labels, num_classes=2).float()
     random_points = torch.randn(1000, 2, device=device, generator=torch.Generator(device=device).manual_seed(config.seed))
 
     log = {}
@@ -178,14 +173,19 @@ def main():
             x_gen = infer(config=config, model=model, scheduler=scheduler, random_points=random_points, cond=eval_one_hot, cfg=config.cfg, idx=i)
             scheduler.setup(num_steps=50, shift=1.0)
             x_gen = infer(config=config, model=model, scheduler=scheduler, random_points=random_points, cond=eval_one_hot, cfg=config.cfg, idx=i)
-            x_gen = x_gen.cpu().numpy()
-            # TODO: metrics per class condition
             if config.class_conditional:
                 metrics = {}
-                for c in np.unique(eval_labels):
-                    metrics.update(eval_metrics(eval_samples[eval_labels == c], x_gen[eval_labels == c], prefix=f"class_{c}/", idx=i))
+                for c in torch.unique(eval_labels):
+                    metrics.update(eval_metrics(eval_samples[eval_labels == c], x_gen[eval_labels == c], prefix=f"class_{c}/"))
+                avg_metrics = defaultdict(list)
+                for k, v in metrics.items():
+                    if "class_" in k:
+                        avg_metrics[k.split("/")[1]].append(v)
+                for k, v in avg_metrics.items():
+                    avg_metrics[k] = sum(v) / len(v)
+                metrics.update(avg_metrics)
             else:
-                metrics = eval_metrics(eval_samples, x_gen, idx=i)
+                metrics = eval_metrics(eval_samples, x_gen)
             log.update(metrics)
             if config.wandb.enabled:
                 wandb.log(log, step=i)
