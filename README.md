@@ -143,3 +143,6 @@ With OT, trajectories are straighter and avoid back-and-forth motion before sett
 # Some more experiments
 - Using FlowMidPointScheduler which does two function evaluations per step, one at the midpoint to more accurately estimate the trajectory. The outputs and metrics turned out to be very similar to using the regular FlowScheduler for twice the number of steps.
 - Using shift to change if model spends more time at the start or end of the trajectory. For simple distributions like two moons, this did not make much difference in metrics.
+
+# Conclusion
+A small flow matching MLP learns the two‑moons distribution reliably with stable training and fast inference. Using optimal transport to pair samples makes inference faster and samples cleaner even with 1–5 inference steps. Class conditioning with classifier‑free guidance sharpens the shapes (with a small controllable trade‑off in diversity).

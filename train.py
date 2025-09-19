@@ -113,7 +113,7 @@ def main():
     config = OmegaConf.merge(config, cli_config)
 
     seed_everything(config.seed)
-    device = torch.device("cuda")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if config.wandb.enabled:
         run = wandb.init(
