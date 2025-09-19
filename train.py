@@ -8,12 +8,12 @@ import wandb
 from omegaconf import OmegaConf
 from sklearn.datasets import make_moons
 from tqdm import tqdm
-# from scipy.optimize import linear_sum_assignment
+from scipy.optimize import linear_sum_assignment
 from torch_linear_assignment import batch_linear_assignment, assignment_to_indices
 
 import src.models
 from src.schedulers import FlowScheduler, FlowMidPointScheduler
-from src.metrics import AvgMeter, wasserstein_distance_2d, mmd_rbf, coverage_and_density, negative_log_likelihood
+from src.metrics import AvgMeter, wasserstein_distance_2d, mmd_rbf, coverage_and_density, negative_log_likelihood, sinkhorn_distance_2d
 
 torch.backends.cudnn.benchmark = True
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -77,15 +77,15 @@ def infer(
             ax.set_title(f"Step {s+1}")
             ax.set_xlim(-2, 3)
             ax.set_ylim(-2, 2)
-            wandb.log({f"{scheduler.__class__.__name__}_steps:{infer_steps}": wandb.Image(fig)}, step=idx)
+            plt.tight_layout()
+            wandb.log({f"{scheduler.__class__.__name__}_steps:{infer_steps:02d}": wandb.Image(fig)}, step=idx)
             plt.close(fig)
 
     model.train()
     return x_t
 
 
-def eval_metrics(eval_samples, x_gen, prefix=""):
-    gen_samples = x_gen.cpu().numpy()
+def eval_metrics(eval_samples, gen_samples, prefix="", idx=0):
     metrics = {}
 
     w_dist = wasserstein_distance_2d(eval_samples, gen_samples)
@@ -100,6 +100,8 @@ def eval_metrics(eval_samples, x_gen, prefix=""):
 
     nll = negative_log_likelihood(eval_samples, gen_samples)
     metrics[f'{prefix}nll'] = nll
+
+    metrics[f'{prefix}sinkhorn'] = sinkhorn_distance_2d(eval_samples, gen_samples, reg=0.1)
     return metrics
 
 
@@ -108,6 +110,7 @@ def hungarian_match(real, noise):
     cost = torch.cdist(real, noise, p=2).pow(2)
     assignment = batch_linear_assignment(cost.unsqueeze(0))
     row_ind, col_ind = assignment_to_indices(assignment)
+    # row_ind, col_ind = linear_sum_assignment(cost.cpu().numpy())
     return noise[col_ind.flatten()]
 
 
@@ -132,7 +135,7 @@ def main():
 
     loss_log = AvgMeter()
     eval_samples, eval_labels = make_moons(n_samples=1000, noise=0.03, random_state=config.seed)
-    eval_one_hot = F.one_hot(torch.from_numpy(eval_labels), num_classes=2).to(device, non_blocking=True)
+    eval_one_hot = F.one_hot(torch.from_numpy(eval_labels), num_classes=2).float().to(device, non_blocking=True)
     random_points = torch.randn(1000, 2, device=device, generator=torch.Generator(device=device).manual_seed(config.seed))
 
     log = {}
@@ -141,7 +144,7 @@ def main():
         x_0, y = make_moons(n_samples=config.training.batch_size, noise=0.03, random_state=i)
         x_0 = torch.from_numpy(x_0).float()
         if config.class_conditional:
-            y = F.one_hot(torch.from_numpy(y), num_classes=2)
+            y = F.one_hot(torch.from_numpy(y), num_classes=2).float()
             y = y.to(device, non_blocking=True)
             p = torch.rand(y.shape[0], device=device)
             y[p <= 0.1] = 0         # for CFG
@@ -162,21 +165,32 @@ def main():
         opt.step()
         loss_log.update(loss.detach())
 
-        if i % config.training.eval_interval == 0:
-            scheduler = FlowScheduler(num_steps=50, shift=1.0, device=device)
+        if i % config.training.eval_interval == 0 or i == 1:
+            scheduler = FlowScheduler(num_steps=1, shift=1.0, device=device)
             x_gen = infer(config=config, model=model, scheduler=scheduler, random_points=random_points, cond=eval_one_hot, cfg=config.cfg, idx=i)
+            scheduler.setup(num_steps=2, shift=1.0)
+            x_gen = infer(config=config, model=model, scheduler=scheduler, random_points=random_points, cond=eval_one_hot, cfg=config.cfg, idx=i)
+            scheduler.setup(num_steps=5, shift=1.0)
+            x_gen = infer(config=config, model=model, scheduler=scheduler, random_points=random_points, cond=eval_one_hot, cfg=config.cfg, idx=i)
+            scheduler.setup(num_steps=10, shift=1.0)
+            x_gen = infer(config=config, model=model, scheduler=scheduler, random_points=random_points, cond=eval_one_hot, cfg=config.cfg, idx=i)
+            scheduler.setup(num_steps=20, shift=1.0)
+            x_gen = infer(config=config, model=model, scheduler=scheduler, random_points=random_points, cond=eval_one_hot, cfg=config.cfg, idx=i)
+            scheduler.setup(num_steps=50, shift=1.0)
+            x_gen = infer(config=config, model=model, scheduler=scheduler, random_points=random_points, cond=eval_one_hot, cfg=config.cfg, idx=i)
+            x_gen = x_gen.cpu().numpy()
             # TODO: metrics per class condition
             if config.class_conditional:
                 metrics = {}
                 for c in np.unique(eval_labels):
-                    metrics.update(eval_metrics(eval_samples[eval_labels == c], x_gen[eval_labels == c], prefix=f"class_{c}/"))
+                    metrics.update(eval_metrics(eval_samples[eval_labels == c], x_gen[eval_labels == c], prefix=f"class_{c}/", idx=i))
             else:
-                metrics = eval_metrics(eval_samples, x_gen)
+                metrics = eval_metrics(eval_samples, x_gen, idx=i)
             log.update(metrics)
             if config.wandb.enabled:
                 wandb.log(log, step=i)
 
-        if i % config.training.log_interval == 0:
+        if i % config.training.log_interval == 0 or i == 1:
             loss_dict = {"loss": loss_log.avg.item()}
             if config.wandb.enabled:
                 wandb.log(loss_dict, step=i)

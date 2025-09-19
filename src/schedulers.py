@@ -3,8 +3,12 @@ import torch
 
 class FlowScheduler:
     def __init__(self, num_steps, shift=1.0, device="cuda"):
+        self.device = device
+        self.setup(num_steps, shift)
+
+    def setup(self, num_steps, shift=1.0):
         self.num_steps = num_steps
-        self.sigmas = torch.linspace(1, num_steps, num_steps, device=device) / num_steps
+        self.sigmas = torch.linspace(1, num_steps, num_steps, device=self.device) / num_steps
         self.shift = shift
         self.sigmas = shift * self.sigmas / (1 + (shift - 1) * self.sigmas)
 
